@@ -9,8 +9,9 @@ license = { workspace = true }
 publish = false
 
 [dependencies]
+arc-swap.workspace = true
 cached = { workspace = true }
-dashmap = { workspace = true }
+hashbrown = { workspace = true }
 jito-core = { workspace = true }
 jito-protos = { workspace = true }
 log = { workspace = true }

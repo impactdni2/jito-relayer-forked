@@ -14,10 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use arc_swap::ArcSwap;
 use clap::Parser;
 use crossbeam_channel::tick;
-use dashmap::DashMap;
 use env_logger::Env;
+use hashbrown::HashMap;
 use jito_block_engine::block_engine::{BlockEngineConfig, BlockEngineRelayerHandler};
 use jito_core::{
     graceful_panic,
@@ -39,9 +40,12 @@ use jito_transaction_relayer::forwarder::start_forward_and_delay_thread;
 use jwt::{AlgorithmType, PKeyWithDigest};
 use log::{debug, error, info, warn};
 use openssl::{hash::MessageDigest, pkey::PKey};
+use solana_account_decoder::UiAccountEncoding;
 use solana_address_lookup_table_program::state::AddressLookupTable;
+use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_metrics::{datapoint_error, datapoint_info};
 use solana_net_utils::multi_bind_in_range;
+use solana_program::pubkey;
 use solana_sdk::{
     address_lookup_table_account::AddressLookupTableAccount,
     pubkey::Pubkey,
@@ -414,8 +418,7 @@ fn main() {
     let rpc_load_balancer = Arc::new(rpc_load_balancer);
 
     // Lookup table refresher
-    let address_lookup_table_cache: Arc<DashMap<Pubkey, AddressLookupTableAccount>> =
-        Arc::new(DashMap::new());
+    let address_lookup_table_cache: Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>> = Default::default();
     let lookup_table_refresher = start_lookup_table_refresher(
         &rpc_load_balancer,
         &address_lookup_table_cache,
@@ -507,7 +510,7 @@ fn main() {
         health_manager.handle(),
         exit.clone(),
         ofac_addresses,
-        address_lookup_table_cache,
+        &address_lookup_table_cache,
         args.validator_packet_batch_size,
         args.forward_all,
     );
@@ -640,7 +643,7 @@ impl ValidatorAuther for ValidatorAutherImpl {
 
 fn start_lookup_table_refresher(
     rpc_load_balancer: &Arc<LoadBalancer>,
-    lookup_table: &Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
+    lookup_table: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
     refresh_duration: Duration,
     exit: &Arc<AtomicBool>,
 ) -> JoinHandle<()> {
@@ -652,9 +655,14 @@ fn start_lookup_table_refresher(
         .name("lookup_table_refresher".to_string())
         .spawn(move || {
             // seed lookup table
-            if let Err(e) = refresh_address_lookup_table(&rpc_load_balancer, &lookup_table) {
-                error!("error refreshing address lookup table: {e:?}");
-            }
+            let updated_lookup_table = match refresh_address_lookup_table(&rpc_load_balancer) {
+                Ok(lookup_table) => lookup_table,
+                Err(e) => {
+                    error!("error seeding lookup table: {e:?}");
+                    HashMap::new()
+                }
+            };
+            lookup_table.swap(Arc::new(updated_lookup_table));
 
             let tick_receiver = tick(Duration::from_secs(1));
             let mut last_refresh = Instant::now();
@@ -666,23 +674,23 @@ fn start_lookup_table_refresher(
                 }
 
                 let now = Instant::now();
-                let refresh_result =
-                    refresh_address_lookup_table(&rpc_load_balancer, &lookup_table);
+                let updated_lookup_table = refresh_address_lookup_table(&rpc_load_balancer);
                 let updated_elapsed = now.elapsed().as_micros();
-                match refresh_result {
-                    Ok(_) => {
+                match updated_lookup_table {
+                    Ok(updated_lookup_table) => {
                         datapoint_info!(
                             "lookup_table_refresher-ok",
                             ("count", 1, i64),
-                            ("lookup_table_size", lookup_table.len(), i64),
+                            ("lookup_table_size", updated_lookup_table.len(), i64),
                             ("updated_elapsed_us", updated_elapsed, i64),
                         );
+                        lookup_table.swap(Arc::new(updated_lookup_table));
                     }
                     Err(e) => {
                         datapoint_error!(
                             "lookup_table_refresher-error",
                             ("count", 1, i64),
-                            ("lookup_table_size", lookup_table.len(), i64),
+                            ("lookup_table_size", lookup_table.load().len(), i64),
                             ("updated_elapsed_us", updated_elapsed, i64),
                             ("error", e.to_string(), String),
                         );
@@ -696,21 +704,25 @@ fn start_lookup_table_refresher(
 
 fn refresh_address_lookup_table(
     rpc_load_balancer: &Arc<LoadBalancer>,
-    lookup_table: &DashMap<Pubkey, AddressLookupTableAccount>,
-) -> solana_client::client_error::Result<()> {
+) -> solana_client::client_error::Result<HashMap<Pubkey, AddressLookupTableAccount>> {
     let rpc_client = rpc_load_balancer.rpc_client();
 
-    let address_lookup_table =
-        Pubkey::from_str("AddressLookupTab1e1111111111111111111111111").unwrap();
+    let address_lookup_table = pubkey!("AddressLookupTab1e1111111111111111111111111");
     let start = Instant::now();
-    let accounts = rpc_client.get_program_accounts(&address_lookup_table)?;
+    let accounts = rpc_client.get_program_accounts_with_config(&address_lookup_table, RpcProgramAccountsConfig {
+      account_config: RpcAccountInfoConfig {
+        encoding: Some(UiAccountEncoding::Base64),
+        ..RpcAccountInfoConfig::default()
+      },
+      ..RpcProgramAccountsConfig::default()
+    })?;
     info!(
         "Fetched {} lookup tables from RPC in {:?}",
         accounts.len(),
         start.elapsed()
     );
 
-    let mut new_pubkeys = HashSet::new();
+    let mut lookup_table = HashMap::with_capacity(accounts.len());
     for (pubkey, account_data) in accounts {
         match AddressLookupTable::deserialize(&account_data.data) {
             Err(e) => {
@@ -718,7 +730,6 @@ fn refresh_address_lookup_table(
             }
             Ok(table) => {
                 debug!("lookup table loaded pubkey: {pubkey:?}, table: {table:?}");
-                new_pubkeys.insert(pubkey);
                 lookup_table.insert(
                     pubkey,
                     AddressLookupTableAccount {
@@ -730,8 +741,5 @@ fn refresh_address_lookup_table(
         }
     }
 
-    // remove all the closed lookup tables
-    lookup_table.retain(|pubkey, _| new_pubkeys.contains(pubkey));
-
-    Ok(())
+    Ok(lookup_table)
 }

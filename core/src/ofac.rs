@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use dashmap::DashMap;
+use hashbrown::HashMap;
 use solana_sdk::{
     address_lookup_table::AddressLookupTableAccount, pubkey::Pubkey,
     transaction::VersionedTransaction,
@@ -10,7 +10,7 @@ use solana_sdk::{
 pub fn is_tx_ofac_related(
     tx: &VersionedTransaction,
     ofac_addresses: &HashSet<Pubkey>,
-    address_lookup_table_cache: &DashMap<Pubkey, AddressLookupTableAccount>,
+    address_lookup_table_cache: &HashMap<Pubkey, AddressLookupTableAccount>,
 ) -> bool {
     is_ofac_address_in_static_keys(tx, ofac_addresses)
         || is_ofac_address_in_lookup_table(tx, ofac_addresses, address_lookup_table_cache)
@@ -31,7 +31,7 @@ fn is_ofac_address_in_static_keys(
 fn is_ofac_address_in_lookup_table(
     tx: &VersionedTransaction,
     ofac_addresses: &HashSet<Pubkey>,
-    address_lookup_table_cache: &DashMap<Pubkey, AddressLookupTableAccount>,
+    address_lookup_table_cache: &HashMap<Pubkey, AddressLookupTableAccount>,
 ) -> bool {
     if let Some(lookup_tables) = tx.message.address_table_lookups() {
         for table in lookup_tables {
@@ -57,7 +57,7 @@ fn is_ofac_address_in_lookup_table(
 mod tests {
     use std::collections::HashSet;
 
-    use dashmap::DashMap;
+    use hashbrown::HashMap;
     use solana_sdk::{
         address_lookup_table_account::AddressLookupTableAccount,
         hash::Hash,
@@ -169,7 +169,7 @@ mod tests {
             addresses: vec![ofac_pubkey, Pubkey::new_unique()],
         };
 
-        let address_lookup_table_cache = DashMap::from_iter([(lookup_table_pubkey, lookup_table)]);
+        let address_lookup_table_cache = HashMap::from_iter([(lookup_table_pubkey, lookup_table)]);
 
         // test read-only ofac address
         let message = VersionedMessage::V0(v0::Message {
@@ -259,7 +259,7 @@ mod tests {
         let ofac_pubkey = Pubkey::new_unique();
         let ofac_addresses: HashSet<Pubkey> = HashSet::from_iter([ofac_pubkey]);
 
-        let address_lookup_table_cache = DashMap::new();
+        let address_lookup_table_cache = HashMap::new();
 
         let payer = Keypair::new();
 

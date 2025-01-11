@@ -9,11 +9,12 @@ license = { workspace = true }
 publish = false
 
 [dependencies]
+arc-swap.workspace = true
 bincode = { workspace = true }
 clap = { workspace = true }
 crossbeam-channel = { workspace = true }
-dashmap = { workspace = true }
 env_logger = { workspace = true }
+hashbrown = { workspace = true }
 hostname = { workspace = true }
 itertools = { workspace = true }
 jito-block-engine = { workspace = true }
@@ -28,6 +29,7 @@ openssl = { workspace = true }
 prost-types = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
+solana-account-decoder = "1.17.33"
 solana-address-lookup-table-program = { workspace = true }
 solana-client = { workspace = true }
 solana-core = { workspace = true }
