@@ -3,7 +3,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     thread::{Builder, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -14,11 +14,6 @@ use cached::{Cached, TimedCache};
 use hashbrown::HashMap;
 use jito_core::ofac::is_tx_ofac_related;
 use jito_protos::{
-    auth::{
-        auth_service_client::AuthServiceClient, GenerateAuthChallengeRequest,
-        GenerateAuthTokensRequest, GenerateAuthTokensResponse, RefreshAccessTokenRequest, Role,
-        Token,
-    },
     block_engine::{
         block_engine_relayer_client::BlockEngineRelayerClient, packet_batch_update::Msg,
         AccountsOfInterestRequest, AccountsOfInterestUpdate, ExpiringPacketBatch,
@@ -33,8 +28,7 @@ use prost_types::Timestamp;
 use solana_core::banking_trace::BankingPacketBatch;
 use solana_metrics::{datapoint_error, datapoint_info};
 use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount, pubkey::Pubkey, signature::Signer,
-    signer::keypair::Keypair, transaction::VersionedTransaction,
+    address_lookup_table::AddressLookupTableAccount, pubkey::Pubkey, transaction::VersionedTransaction,
 };
 use thiserror::Error;
 use tokio::{
@@ -45,8 +39,6 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
-    codegen::InterceptedService,
-    service::Interceptor,
     transport::{Channel, Endpoint},
     Response, Status, Streaming,
 };
@@ -55,30 +47,6 @@ use crate::block_engine_stats::BlockEngineStats;
 
 pub struct BlockEngineConfig {
     pub block_engine_url: String,
-    pub auth_service_url: String,
-}
-
-#[derive(Clone)]
-struct AuthInterceptor {
-    access_token: Arc<Mutex<Token>>,
-}
-
-impl AuthInterceptor {
-    pub fn new(access_token: Arc<Mutex<Token>>) -> Self {
-        AuthInterceptor { access_token }
-    }
-}
-
-impl Interceptor for AuthInterceptor {
-    fn call(&mut self, mut request: tonic::Request<()>) -> Result<tonic::Request<()>, Status> {
-        request.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {}", self.access_token.lock().unwrap().value)
-                .parse()
-                .unwrap(),
-        );
-        Ok(request)
-    }
 }
 
 pub struct BlockEnginePackets {
@@ -110,7 +78,6 @@ impl BlockEngineRelayerHandler {
     pub fn new(
         block_engine_config: Option<BlockEngineConfig>,
         mut block_engine_receiver: Receiver<BlockEnginePackets>,
-        keypair: Arc<Keypair>,
         exit: Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
         address_lookup_table_cache: Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
@@ -125,11 +92,9 @@ impl BlockEngineRelayerHandler {
                     let rt = Runtime::new().unwrap();
                     rt.block_on(async move {
                         while !exit.load(Ordering::Relaxed) {
-                            let result = Self::auth_and_connect(
+                            let result = Self::connect(
                                 &config.block_engine_url,
-                                &config.auth_service_url,
                                 &mut block_engine_receiver,
-                                &keypair,
                                 &exit,
                                 aoi_cache_ttl_s,
                                 &address_lookup_table_cache,
@@ -143,7 +108,6 @@ impl BlockEngineRelayerHandler {
                                 error!("error authenticating and connecting: {:?}", e);
                                 datapoint_error!("block_engine_relayer-error",
                                     "block_engine_url" => &config.block_engine_url,
-                                    "auth_service_url" => &config.auth_service_url,
                                     ("error", e.to_string(), String)
                                 );
                                 sleep(Duration::from_secs(2)).await;
@@ -164,103 +128,17 @@ impl BlockEngineRelayerHandler {
         }
     }
 
-    /// Relayers are whitelisted in the block engine. In order to auth, a challenge-response handshake
-    /// is performed. After that, the relayer can fetch an access and refresh JWT token that's provided
-    /// in request headers to the block engine.
-    async fn auth(
-        auth_client: &mut AuthServiceClient<Channel>,
-        keypair: &Arc<Keypair>,
-    ) -> BlockEngineResult<(Token, Token)> {
-        let auth_response = auth_client
-            .generate_auth_challenge(GenerateAuthChallengeRequest {
-                role: Role::Relayer.into(),
-                pubkey: keypair.pubkey().to_bytes().to_vec(),
-            })
-            .await
-            .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?;
-
-        let challenge = format!(
-            "{}-{}",
-            keypair.pubkey(),
-            auth_response.into_inner().challenge
-        );
-        let signed_challenge = keypair.sign_message(challenge.as_bytes()).as_ref().to_vec();
-
-        let GenerateAuthTokensResponse {
-            access_token: maybe_access_token,
-            refresh_token: maybe_refresh_token,
-        } = auth_client
-            .generate_auth_tokens(GenerateAuthTokensRequest {
-                challenge,
-                client_pubkey: keypair.pubkey().as_ref().to_vec(),
-                signed_challenge,
-            })
-            .await
-            .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?
-            .into_inner();
-
-        if maybe_access_token.is_none() || maybe_refresh_token.is_none() {
-            return Err(BlockEngineError::AuthServiceFailure(
-                "failed to get valid auth tokens".to_string(),
-            ));
-        }
-        let access_token = maybe_access_token.unwrap();
-        let refresh_token = maybe_refresh_token.unwrap();
-
-        if access_token.expires_at_utc.is_none() || refresh_token.expires_at_utc.is_none() {
-            return Err(BlockEngineError::AuthServiceFailure(
-                "auth tokens don't have valid expiration time".to_string(),
-            ));
-        }
-
-        Ok((access_token, refresh_token))
-    }
-
     /// Authenticates the relayer with the block engine and connects to the forwarding service
     #[allow(clippy::too_many_arguments)]
-    async fn auth_and_connect(
+    async fn connect(
         block_engine_url: &str,
-        auth_service_url: &str,
         block_engine_receiver: &mut Receiver<BlockEnginePackets>,
-        keypair: &Arc<Keypair>,
         exit: &Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
         address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
         is_connected_to_block_engine: &Arc<AtomicBool>,
         ofac_addresses: &HashSet<Pubkey>,
     ) -> BlockEngineResult<()> {
-        let mut auth_endpoint = Endpoint::from_str(auth_service_url).expect("valid auth url");
-        if auth_service_url.contains("https") {
-            auth_endpoint = auth_endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new())
-                .expect("invalid tls config");
-        }
-        let channel = auth_endpoint
-            .connect()
-            .await
-            .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?;
-        let mut auth_client = AuthServiceClient::new(channel);
-
-        let (access_token, mut refresh_token) = Self::auth(&mut auth_client, keypair).await?;
-
-        let access_token_expiration =
-            SystemTime::try_from(access_token.expires_at_utc.as_ref().unwrap().clone()).unwrap();
-        let refresh_token_expiration =
-            SystemTime::try_from(refresh_token.expires_at_utc.as_ref().unwrap().clone()).unwrap();
-
-        info!(
-            "access_token_expiration: {:?}, refresh_token_expiration: {:?}",
-            access_token_expiration
-                .duration_since(SystemTime::now())
-                .unwrap(),
-            refresh_token_expiration
-                .duration_since(SystemTime::now())
-                .unwrap()
-        );
-
-        let shared_access_token = Arc::new(Mutex::new(access_token));
-        let auth_interceptor = AuthInterceptor::new(shared_access_token.clone());
-
         let mut block_engine_endpoint =
             Endpoint::from_str(block_engine_url).expect("valid block engine url");
         if block_engine_url.contains("https") {
@@ -275,19 +153,13 @@ impl BlockEngineRelayerHandler {
 
         datapoint_info!("block_engine-connection_stats",
             "block_engine_url" => block_engine_url,
-            "auth_service_url" => auth_service_url,
             ("connected", 1, i64)
         );
 
-        let block_engine_client =
-            BlockEngineRelayerClient::with_interceptor(block_engine_channel, auth_interceptor);
+        let block_engine_client = BlockEngineRelayerClient::new(block_engine_channel);
         Self::start_event_loop(
             block_engine_client,
             block_engine_receiver,
-            auth_client,
-            keypair,
-            &mut refresh_token,
-            shared_access_token,
             exit,
             aoi_cache_ttl_s,
             address_lookup_table_cache,
@@ -304,12 +176,8 @@ impl BlockEngineRelayerHandler {
     /// try to re-establish connection
     #[allow(clippy::too_many_arguments)]
     async fn start_event_loop(
-        mut client: BlockEngineRelayerClient<InterceptedService<Channel, AuthInterceptor>>,
+        mut client: BlockEngineRelayerClient<Channel>,
         block_engine_receiver: &mut Receiver<BlockEnginePackets>,
-        auth_client: AuthServiceClient<Channel>,
-        keypair: &Arc<Keypair>,
-        refresh_token: &mut Token,
-        shared_access_token: Arc<Mutex<Token>>,
         exit: &Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
         address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
@@ -338,10 +206,6 @@ impl BlockEngineRelayerHandler {
             block_engine_receiver,
             subscribe_aoi_stream,
             subscribe_poi_stream,
-            auth_client,
-            keypair,
-            refresh_token,
-            shared_access_token,
             exit,
             aoi_cache_ttl_s,
             address_lookup_table_cache,
@@ -357,10 +221,6 @@ impl BlockEngineRelayerHandler {
         block_engine_receiver: &mut Receiver<BlockEnginePackets>,
         subscribe_aoi_stream: Response<Streaming<AccountsOfInterestUpdate>>,
         subscribe_poi_stream: Response<Streaming<ProgramsOfInterestUpdate>>,
-        mut auth_client: AuthServiceClient<Channel>,
-        keypair: &Arc<Keypair>,
-        refresh_token: &mut Token,
-        shared_access_token: Arc<Mutex<Token>>,
         exit: &Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
         address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
@@ -384,7 +244,6 @@ impl BlockEngineRelayerHandler {
         let mut block_engine_stats = BlockEngineStats::default();
 
         let mut heartbeat_interval = interval(Duration::from_millis(500));
-        let mut auth_refresh_interval = interval(Duration::from_secs(60));
         let mut metrics_interval = interval(Duration::from_secs(10));
 
         let mut heartbeat_count = 0;
@@ -445,16 +304,6 @@ impl BlockEngineRelayerHandler {
                         block_engine_stats.increment_packet_forward_elapsed_us(now.elapsed().as_micros() as u64);
                     }
                 }
-                _ = auth_refresh_interval.tick() => {
-                    trace!("refreshing auth interval");
-                    let now = Instant::now();
-
-                    let did_refresh = Self::maybe_refresh_auth(&mut auth_client, keypair, refresh_token, &shared_access_token).await?;
-                    if did_refresh {
-                        block_engine_stats.increment_auth_refresh_count(1);
-                    }
-                    block_engine_stats.increment_refresh_auth_elapsed_us(now.elapsed().as_micros() as u64);
-                }
                 rx = metrics_interval.tick() => {
                     trace!("flushing metrics");
                     block_engine_stats.increment_metrics_delay_us(rx.elapsed().as_micros() as u64);
@@ -479,80 +328,6 @@ impl BlockEngineRelayerHandler {
             );
         }
         Ok(())
-    }
-
-    /// Refresh authentication tokens if they're about to expire
-    async fn maybe_refresh_auth(
-        auth_client: &mut AuthServiceClient<Channel>,
-        keypair: &Arc<Keypair>,
-        refresh_token: &mut Token,
-        shared_access_token: &Arc<Mutex<Token>>,
-    ) -> BlockEngineResult<bool> {
-        // expires_at_utc is checked for None when establishing connection
-        let access_token_expiration_time = shared_access_token
-            .lock()
-            .unwrap()
-            .expires_at_utc
-            .as_ref()
-            .unwrap()
-            .clone();
-
-        let access_token_expiration_time =
-            SystemTime::try_from(access_token_expiration_time).unwrap();
-        let access_token_duration_left =
-            access_token_expiration_time.duration_since(SystemTime::now());
-
-        let refresh_token_expiration_time =
-            SystemTime::try_from(refresh_token.expires_at_utc.as_ref().unwrap().clone()).unwrap();
-        let refresh_token_duration_left =
-            refresh_token_expiration_time.duration_since(SystemTime::now());
-
-        let is_access_token_expiring_soon = match access_token_duration_left {
-            Ok(dur) => dur < Duration::from_secs(5 * 60),
-            Err(_) => true,
-        };
-        let is_refresh_token_expiring_soon = match refresh_token_duration_left {
-            Ok(dur) => dur < Duration::from_secs(5 * 60),
-            Err(_) => true,
-        };
-
-        match (
-            is_refresh_token_expiring_soon,
-            is_access_token_expiring_soon,
-        ) {
-            (true, _) => {
-                // re-run the authentication process from the beginning
-                let (access_token, new_refresh_token) = Self::auth(auth_client, keypair).await?;
-
-                *refresh_token = new_refresh_token;
-                *shared_access_token.lock().unwrap() = access_token;
-                info!("access and refresh token were refreshed");
-
-                Ok(true)
-            }
-            (false, true) => {
-                // fetch a new access token
-                let response = auth_client
-                    .refresh_access_token(RefreshAccessTokenRequest {
-                        refresh_token: refresh_token.value.clone(),
-                    })
-                    .await
-                    .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?;
-
-                let maybe_access_token = response.into_inner().access_token;
-                if maybe_access_token.is_none() {
-                    return Err(BlockEngineError::AuthServiceFailure(
-                        "missing access token".to_string(),
-                    ));
-                }
-
-                *shared_access_token.lock().unwrap() = maybe_access_token.unwrap();
-                info!("access token was refreshed");
-
-                Ok(true)
-            }
-            (false, false) => Ok(false),
-        }
     }
 
     fn handle_aoi(

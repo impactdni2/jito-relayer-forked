@@ -472,12 +472,8 @@ fn main() {
     let is_connected_to_block_engine = Arc::new(AtomicBool::new(false));
     let block_engine_config = if !args.disable_mempool && args.block_engine_url.is_some() {
         let block_engine_url = args.block_engine_url.unwrap();
-        let auth_service_url = args
-            .block_engine_auth_service_url
-            .unwrap_or(block_engine_url.clone());
         Some(BlockEngineConfig {
             block_engine_url,
-            auth_service_url,
         })
     } else {
         None
@@ -485,7 +481,6 @@ fn main() {
     let block_engine_forwarder = BlockEngineRelayerHandler::new(
         block_engine_config,
         block_engine_receiver,
-        keypair,
         exit.clone(),
         args.aoi_cache_ttl_secs,
         address_lookup_table_cache.clone(),
