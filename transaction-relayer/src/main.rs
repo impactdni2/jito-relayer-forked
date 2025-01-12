@@ -64,16 +64,6 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    /// DEPRECATED, will be removed in a future release.
-    #[deprecated(since = "0.1.8", note = "UDP TPU disabled")]
-    #[arg(long, env, default_value_t = 0)]
-    tpu_port: u16,
-
-    /// DEPRECATED, will be removed in a future release.
-    #[deprecated(since = "0.1.8", note = "UDP TPU_FWD disabled")]
-    #[arg(long, env, default_value_t = 0)]
-    tpu_fwd_port: u16,
-
     /// Port to bind to for tpu quic packets.
     /// The TPU will bind to all ports in the range of (tpu_quic_port, tpu_quic_port + num_tpu_quic_servers).
     /// Open firewall ports for this entire range
@@ -183,14 +173,6 @@ struct Args {
     /// How long it takes to miss a slot for the system to be considered unhealthy
     #[arg(long, env, default_value_t = 10)]
     missing_slot_unhealthy_secs: u64,
-
-    /// DEPRECATED. Solana cluster name (mainnet-beta, testnet, devnet, ...)
-    #[arg(long, env)]
-    cluster: Option<String>,
-
-    /// DEPRECATED. Region (amsterdam, dallas, frankfurt, ...)
-    #[arg(long, env)]
-    region: Option<String>,
 
     /// Accounts of interest cache TTL. Note this must play nicely with the refresh period that
     /// block engine uses to send full updates.
@@ -322,14 +304,6 @@ fn main() {
 
     let args: Args = Args::parse();
     info!("args: {:?}", args);
-
-    // Warn about deprecated args
-    if args.cluster.is_some() {
-        warn!("--cluster arg is deprecated and may be removed in the next release.")
-    }
-    if args.region.is_some() {
-        warn!("--region arg is deprecated and may be removed in the next release.")
-    }
 
     let public_ip = if args.public_ip.is_some() {
         args.public_ip.unwrap()
