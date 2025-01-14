@@ -29,7 +29,7 @@ use prost_types::Timestamp;
 use solana_core::banking_trace::BankingPacketBatch;
 use solana_metrics::datapoint_info;
 use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount, clock::Slot, pubkey::Pubkey,
+    address_lookup_table::AddressLookupTableAccount, clock::NUM_CONSECUTIVE_LEADER_SLOTS, pubkey::Pubkey,
     saturating_add_assign, transaction::VersionedTransaction,
 };
 use thiserror::Error;
@@ -531,8 +531,7 @@ impl RelayerImpl {
                         .map(|(pk, sender)| (*pk, sender.clone()))
                         .collect()
                 } else {
-                    let slot_leaders =
-                        new_slot..new_slot + leader_lookahead * NUM_CONSECUTIVE_LEADER_SLOTS;
+                    let slot_leaders = new_slot..new_slot + slot_lookahead * NUM_CONSECUTIVE_LEADER_SLOTS;
                     let schedule = leader_schedule_cache.get_schedule().load();
                     senders = slot_leaders
                         .filter_map(|s| schedule.get(&s))
