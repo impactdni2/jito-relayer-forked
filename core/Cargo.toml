@@ -9,10 +9,9 @@ license = { workspace = true }
 publish = false
 
 [dependencies]
-arc-swap.workspace = true
 bincode = { workspace = true }
 crossbeam-channel = { workspace = true }
-hashbrown = { workspace = true }
+dashmap = { workspace = true }
 jito-rpc = { workspace = true }
 lazy_static = { workspace = true }
 log = { workspace = true }

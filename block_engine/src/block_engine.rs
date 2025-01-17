@@ -9,9 +9,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use arc_swap::ArcSwap;
 use cached::{Cached, TimedCache};
-use hashbrown::HashMap;
+use dashmap::DashMap;
 use jito_core::ofac::is_tx_ofac_related;
 use jito_protos::{
     block_engine::{
@@ -80,7 +79,7 @@ impl BlockEngineRelayerHandler {
         mut block_engine_receiver: Receiver<BlockEnginePackets>,
         exit: Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
-        address_lookup_table_cache: Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         is_connected_to_block_engine: &Arc<AtomicBool>,
         ofac_addresses: HashSet<Pubkey>,
     ) -> BlockEngineRelayerHandler {
@@ -135,7 +134,7 @@ impl BlockEngineRelayerHandler {
         block_engine_receiver: &mut Receiver<BlockEnginePackets>,
         exit: &Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
-        address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: &Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         is_connected_to_block_engine: &Arc<AtomicBool>,
         ofac_addresses: &HashSet<Pubkey>,
     ) -> BlockEngineResult<()> {
@@ -180,7 +179,7 @@ impl BlockEngineRelayerHandler {
         block_engine_receiver: &mut Receiver<BlockEnginePackets>,
         exit: &Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
-        address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: &Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         is_connected_to_block_engine: &Arc<AtomicBool>,
         ofac_addresses: &HashSet<Pubkey>,
     ) -> BlockEngineResult<()> {
@@ -223,7 +222,7 @@ impl BlockEngineRelayerHandler {
         subscribe_poi_stream: Response<Streaming<ProgramsOfInterestUpdate>>,
         exit: &Arc<AtomicBool>,
         aoi_cache_ttl_s: u64,
-        address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: &Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         is_connected_to_block_engine: &Arc<AtomicBool>,
         ofac_addresses: &HashSet<Pubkey>,
     ) -> BlockEngineResult<()> {
@@ -412,7 +411,7 @@ impl BlockEngineRelayerHandler {
         num_packets: u64,
         accounts_of_interest: &mut TimedCache<Pubkey, u8>,
         programs_of_interest: &mut TimedCache<Pubkey, u8>,
-        address_lookup_table_cache: &Arc<ArcSwap<HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: &DashMap<Pubkey, AddressLookupTableAccount>,
         ofac_addresses: &HashSet<Pubkey>,
     ) -> Option<ExpiringPacketBatch> {
         let mut filtered_packets = Vec::with_capacity(num_packets as usize);
@@ -424,18 +423,16 @@ impl BlockEngineRelayerHandler {
                 }
 
                 if let Ok(tx) = packet.deserialize_slice::<VersionedTransaction, _>(..) {
-                    let lookup_table = address_lookup_table_cache.load();
-                    let r = lookup_table.as_ref();
                     let is_forwardable = if ofac_addresses.is_empty() {
                         is_aoi_in_static_keys(&tx, accounts_of_interest, programs_of_interest)
                             || is_aoi_in_lookup_table(
                                 &tx,
                                 accounts_of_interest,
                                 programs_of_interest,
-                                r,
+                                address_lookup_table_cache,
                             )
                     } else {
-                        !is_tx_ofac_related(&tx, ofac_addresses, r)
+                        !is_tx_ofac_related(&tx, ofac_addresses, address_lookup_table_cache)
                             && (is_aoi_in_static_keys(
                                 &tx,
                                 accounts_of_interest,
@@ -444,7 +441,7 @@ impl BlockEngineRelayerHandler {
                                 &tx,
                                 accounts_of_interest,
                                 programs_of_interest,
-                                r,
+                                address_lookup_table_cache,
                             ))
                     };
 
@@ -518,7 +515,7 @@ fn is_aoi_in_lookup_table(
     tx: &VersionedTransaction,
     accounts_of_interest: &mut TimedCache<Pubkey, u8>,
     programs_of_interest: &mut TimedCache<Pubkey, u8>,
-    address_lookup_table_cache: &HashMap<Pubkey, AddressLookupTableAccount>,
+    address_lookup_table_cache: &DashMap<Pubkey, AddressLookupTableAccount>,
 ) -> bool {
     if let Some(lookup_tables) = tx.message.address_table_lookups() {
         for table in lookup_tables {

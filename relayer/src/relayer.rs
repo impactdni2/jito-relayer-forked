@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use arc_swap::ArcSwap;
 use crossbeam_channel::{bounded, Receiver, RecvError, Sender};
+use dashmap::DashMap;
 use histogram::Histogram;
 use jito_core::ofac::is_tx_ofac_related;
 use jito_protos::{
@@ -386,7 +386,7 @@ impl RelayerImpl {
         health_state: Arc<RwLock<HealthState>>,
         exit: Arc<AtomicBool>,
         ofac_addresses: HashSet<Pubkey>,
-        address_lookup_table_cache: &Arc<ArcSwap<hashbrown::HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         validator_packet_batch_size: usize,
         forward_all: bool,
         slot_lookahead: u64,
@@ -398,7 +398,6 @@ impl RelayerImpl {
         let packet_subscriptions = Arc::new(RwLock::new(HashMap::with_capacity(1_000)));
 
         let thread = {
-            let address_lookup_table_cache = address_lookup_table_cache.clone();
             let health_state = health_state.clone();
             let packet_subscriptions = packet_subscriptions.clone();
             thread::Builder::new()
@@ -414,7 +413,7 @@ impl RelayerImpl {
                         exit,
                         &packet_subscriptions,
                         ofac_addresses,
-                        &address_lookup_table_cache,
+                        address_lookup_table_cache,
                         validator_packet_batch_size,
                         forward_all,
                     );
@@ -450,7 +449,7 @@ impl RelayerImpl {
         exit: Arc<AtomicBool>,
         packet_subscriptions: &PacketSubscriptions,
         ofac_addresses: HashSet<Pubkey>,
-        address_lookup_table_cache: &Arc<ArcSwap<hashbrown::HashMap<Pubkey, AddressLookupTableAccount>>>,
+        address_lookup_table_cache: Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         validator_packet_batch_size: usize,
         forward_all: bool,
     ) -> RelayerResult<()> {
@@ -471,8 +470,7 @@ impl RelayerImpl {
             crossbeam_channel::select! {
                 recv(delay_packet_receiver) -> maybe_packet_batches => {
                     let start = Instant::now();
-                    let lookup_table = address_lookup_table_cache.load();
-                    let failed_forwards = Self::forward_packets(maybe_packet_batches, &senders, &mut relayer_metrics, &ofac_addresses, lookup_table.as_ref(), validator_packet_batch_size)?;
+                    let failed_forwards = Self::forward_packets(maybe_packet_batches, &senders, &mut relayer_metrics, &ofac_addresses, &address_lookup_table_cache, validator_packet_batch_size)?;
                     Self::drop_connections(failed_forwards, packet_subscriptions, &mut relayer_metrics);
                     let _ = relayer_metrics.crossbeam_delay_packet_receiver_processing_us.increment(start.elapsed().as_micros() as u64);
                 },
@@ -607,7 +605,7 @@ impl RelayerImpl {
         )>,
         relayer_metrics: &mut RelayerMetrics,
         ofac_addresses: &HashSet<Pubkey>,
-        address_lookup_table_cache: &hashbrown::HashMap<Pubkey, AddressLookupTableAccount>,
+        address_lookup_table_cache: &Arc<DashMap<Pubkey, AddressLookupTableAccount>>,
         validator_packet_batch_size: usize,
     ) -> RelayerResult<Vec<Pubkey>> {
         let packet_batches = maybe_packet_batches?;
