@@ -28,6 +28,7 @@ openssl = { workspace = true }
 prost-types = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
+solana-account-decoder = "1.17.33"
 solana-address-lookup-table-program = { workspace = true }
 solana-client = { workspace = true }
 solana-core = { workspace = true }

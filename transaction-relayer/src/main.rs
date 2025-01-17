@@ -39,7 +39,9 @@ use jito_transaction_relayer::forwarder::start_forward_and_delay_thread;
 use jwt::{AlgorithmType, PKeyWithDigest};
 use log::{debug, error, info, warn};
 use openssl::{hash::MessageDigest, pkey::PKey};
+use solana_account_decoder::UiAccountEncoding;
 use solana_address_lookup_table_program::state::AddressLookupTable;
+use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_metrics::{datapoint_error, datapoint_info};
 use solana_net_utils::multi_bind_in_range;
 use solana_sdk::{
@@ -689,7 +691,13 @@ fn refresh_address_lookup_table(
     let address_lookup_table =
         Pubkey::from_str("AddressLookupTab1e1111111111111111111111111").unwrap();
     let start = Instant::now();
-    let accounts = rpc_client.get_program_accounts(&address_lookup_table)?;
+    let accounts = rpc_client.get_program_accounts_with_config(&address_lookup_table, RpcProgramAccountsConfig {
+      account_config: RpcAccountInfoConfig {
+        encoding: Some(UiAccountEncoding::Base64),
+        ..RpcAccountInfoConfig::default()
+      },
+      ..RpcProgramAccountsConfig::default()
+    })?;
     info!(
         "Fetched {} lookup tables from RPC in {:?}",
         accounts.len(),

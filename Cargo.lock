@@ -2858,6 +2858,7 @@ dependencies = [
  "prost-types 0.12.6",
  "serde",
  "serde_yaml",
+ "solana-account-decoder",
  "solana-address-lookup-table-program",
  "solana-client",
  "solana-core",
