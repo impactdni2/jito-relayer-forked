@@ -8,6 +8,11 @@ edition = { workspace = true }
 license = { workspace = true }
 publish = false
 
+[features]
+info = ["tracing/max_level_info", "tracing/release_max_level_info"]
+warn = ["tracing/max_level_warn", "tracing/release_max_level_warn"]
+error = ["tracing/max_level_error", "tracing/release_max_level_error"]
+
 [dependencies]
 bincode = { workspace = true }
 clap = { workspace = true }
@@ -42,3 +47,4 @@ tikv-jemallocator = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
+tracing = { workspace = true }
